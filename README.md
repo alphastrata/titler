@@ -6,25 +6,20 @@ Ideally it works by pulling metadata from the pdfs, if that fails it uses the Nu
 # requirements:
 - a beefy rig
 - poetry
-- python3.11
+- python3.11 (if you're nixxing just use the included `flake.nix`)
 - pytorch (if using the local_v1.py) [recommended]
 - ollama ( if using it to run the models) [this will eventually replace the local_v1.py]
 
 # usage:
 ![output.png](output.png)
 
-
-```sh
-poetry run python local_v1.py --input /home/jer/Documents/go/scrapeThisFor/output/paper.pdf
-```
-
-or [eventually...]
 ```sh
 # In one terminal:
 ollama pull llama3:latest
-ollama serve
+ollama serve # Leave this running..
 
 # In another terminal:
+poetry install --no-root
 poetry run python main.py --input /home/jer/Documents/go/scrapeThisFor/output/paper.pdf
 ```
 
