@@ -1,18 +1,117 @@
-import argparse
-from time import perf_counter
+import fire
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+from time import perf_counter
 import re
+import os
+import sys
+import fitz  # PyMuPDF, for PDF handling
+import json
+import requests
+import logging
 
-from pdf_utils import extract_text_from_pdf, get_metadata
-from ollama import call_ollama_api
-from misc_utils import (
-    is_valid_title,
-    remove_empty_files,
-    clear_screen,
-    rename_pdf,
-    sanitize_filename,
-)
+# Set up logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Capture all levels; handlers will filter
 
+# Handlers
+console_handler = logging.StreamHandler()
+file_handler = logging.FileHandler('error.log')
+
+# Set default levels (adjusted in main())
+console_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.ERROR)
+
+# Formatters
+console_formatter = logging.Formatter('%(message)s')
+file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+console_handler.setFormatter(console_formatter)
+file_handler.setFormatter(file_formatter)
+
+# Add handlers to logger
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+# Function to extract text from PDF
+def extract_text_from_pdf(pdf_path):
+    try:
+        doc = fitz.open(pdf_path)
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting text from {pdf_path}: {e}")
+        return None
+
+# Function to get metadata from PDF
+def get_metadata(pdf_path):
+    try:
+        doc = fitz.open(pdf_path)
+        metadata = doc.metadata
+        doc.close()
+        return metadata
+    except Exception as e:
+        logger.error(f"Error getting metadata from {pdf_path}: {e}")
+        return {}
+
+# Function to call the LLM API (replace with actual API details)
+def call_ollama_api(model_name, prompt):
+    # Replace with actual API call code
+    url = f"http://localhost:11434/generate"
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "model": model_name,
+        "prompt": prompt
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        return result.get('response', '')
+    except Exception as e:
+        logger.error(f"Error calling LLM API: {e}")
+        return ""
+
+# Utility functions
+def is_valid_title(title):
+    return title and len(title.strip()) > 5
+
+def remove_empty_files(file_path):
+    if os.path.isfile(file_path) and os.path.getsize(file_path) == 0:
+        os.remove(file_path)
+
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def sanitize_filename(name):
+    return re.sub(r'[\\/*?:"<>|]', "", name)
+
+def rename_pdf(input_file, new_title, auto=False, output_dir=None):
+    new_file_name = f"{new_title}.pdf"
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        new_file_path = output_dir / new_file_name
+    else:
+        new_file_path = input_file.parent / new_file_name
+
+    if new_file_path.exists():
+        logger.info(f"File {new_file_name} already exists.")
+        return
+    if auto:
+        input_file.rename(new_file_path)
+        logger.info(f"Renamed to {new_file_name}")
+    else:
+        response = input(f"Rename '{input_file.name}' to '{new_file_name}'? [y/N]: ")
+        if response.lower() == 'y':
+            input_file.rename(new_file_path)
+            logger.info(f"Renamed to {new_file_name}")
+        else:
+            logger.info("Rename cancelled.")
 
 def generate_title_with_llm(text):
     prompt = f"""
@@ -65,93 +164,93 @@ texel access for each texture map lookup (Figure 1)."
 ### Text:
 {{'pdf_contents": {text} ',\n"pdf_title": ""}}
 """
-    response = call_ollama_api("llama3.1:latest", prompt)
 
+    response = call_ollama_api("gemma2:2b", prompt)
+
+    
     if isinstance(response, dict):
         response_text = response.get("response", "")
     elif isinstance(response, str):
         response_text = response
     else:
-        print(f"\033[95mUnexpected response type: {type(response)}\033[0m")
+        logger.error(f"Unexpected response type: {type(response)}")
         return "Title not found"
 
     match = re.search(r'"pdf_title":\s*"([^"]+)"', response_text)
     if match:
         return match.group(1)
     else:
-        print("\033[95mTitle not found in LLM output\033[0m")
+        logger.error("Title not found in LLM output")
         return "Title not found"
 
+def process_file(input_file, auto=False, force_llm=False, output_dir=None):
+    try:
+        logger.info(f"\033[95mProcessing: {input_file}\033[0m")
+        new_title = None
 
-def process_file(input_file, auto=False, force_llm=False) -> None:
-    # leave a log for the auto flow, clear for the user one (it gets cluttered)
-    if not auto:
-        clear_screen()
+        text = extract_text_from_pdf(input_file)
+        if not text:
+            return
 
-    # Purple
-    print(f"\033[95mProcessing: {input_file}\033[0m")
-    new_title = None
+        if force_llm:
+            t1 = perf_counter()
+            new_title = generate_title_with_llm(text)
+            end = perf_counter() - t1
 
-    text = extract_text_from_pdf(input_file)
-    if not text:
-        return
+            logger.info(f"\033[92mGenerated title: {new_title} in {end:.2f}s\033[0m")
 
-    if force_llm:
-        t1 = perf_counter()
-        new_title = generate_title_with_llm(text)
-        end = perf_counter() - t1
+            rename_pdf(input_file, sanitize_filename(new_title), auto, output_dir)
+            return
 
-        # Green to match reccomendation in upcoming choices
-        print(f"\033[92mGenerated title: {new_title} in {end}s\033[0m")
+        metadata = get_metadata(input_file)
+        metadata_title = metadata.get("title", None)
+        if metadata_title and is_valid_title(metadata_title):
+            logger.info(f"Using metadata title: {metadata_title}")
+            new_title = sanitize_filename(metadata_title)
+            rename_pdf(input_file, new_title, auto, output_dir)
+        else:
+            logger.info("Forcing LLM to generate a title")
+            t1 = perf_counter()
+            new_title = generate_title_with_llm(text)
+            end = perf_counter() - t1
 
-        rename_pdf(input_file, sanitize_filename(new_title), auto)
-        return
+            logger.info(f"\033[92mGenerated title: {new_title} in {end:.2f}s\033[0m")
 
-    metadata = get_metadata(input_file)
-    metadata_title = metadata.get("title", None)
-    if metadata_title and is_valid_title(metadata_title):
-        print(f"Using metadata title: {metadata_title}")
-        new_title = sanitize_filename(metadata_title)
-        rename_pdf(input_file, new_title, auto)
+            rename_pdf(input_file, sanitize_filename(new_title), auto, output_dir)
+
+    except Exception as e:
+        logger.error(f"Error processing {input_file}: {e}")
+
+def process_files_concurrently(files, auto=False, force_llm=False, output_dir=None):
+    with ThreadPoolExecutor() as executor:
+        futures = {
+            executor.submit(process_file, file, auto, force_llm, output_dir): file
+            for file in files
+        }
+        # Always show the progress bar
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing PDFs", disable=False):
+            try:
+                future.result()
+            except Exception as e:
+                file = futures[future]
+                logger.error(f"Error processing {file}: {e}")
+
+def main(input, auto=False, force_llm=False, silent=False, output_dir=None):
+    # Adjust logging level based on silent flag
+    if silent:
+        console_handler.setLevel(logging.CRITICAL)
     else:
-        print(f"Forcing LLM to generate a title")
-        process_file(input_file, auto=auto, force_llm=True)
-        print("\033[95mFallback to using LLM to generate a title...\033[0m")
+        console_handler.setLevel(logging.INFO)
 
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Process PDF files and rename based on content."
-    )
-    parser.add_argument(
-        "--input",
-        type=str,
-        required=True,
-        help="Path to the input PDF file or directory containing PDFs",
-    )
-    parser.add_argument(
-        "--auto",
-        type=bool,
-        required=False,
-        help="Let the llm/title found write the filenames automatically without user prompting [not a good idea?]",
-    )
-    parser.add_argument(
-        "--force-llm",
-        type=bool,
-        required=False,
-        default=False,
-        help="Force the llm to be used, skipping metadata even if available",
-    )
-    args = parser.parse_args()
-
-    input_path = Path(args.input)
+    input_path = Path(input)
     if input_path.is_dir():
-        for file in input_path.glob("*.pdf"):
+        files = list(input_path.glob("*.pdf"))
+        for file in files:
             remove_empty_files(file)
-            process_file(file, args.auto, args.force_llm)
+        process_files_concurrently(files, auto, force_llm, output_dir)
     else:
-        process_file(input_path, args.auto, args.force_llm)
-
+        remove_empty_files(input_path)
+        process_file(input_path, auto, force_llm, output_dir)
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)
